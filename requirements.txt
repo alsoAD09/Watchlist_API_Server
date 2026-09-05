@@ -3,6 +3,6 @@ uvicorn==0.28.0
 pydantic==2.6.4
 groq==0.4.2
 pandas==2.2.1
-numpy<2.0.0
-git+https://github.com/twopirllc/pandas-ta.git
+numpy
+pandas-ta
 TA-Lib-binary
