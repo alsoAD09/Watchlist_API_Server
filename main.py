@@ -2,7 +2,6 @@ import os
 import json
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize Groq Client
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
@@ -84,23 +84,17 @@ class PatternDetectionRequest(BaseModel):
 # ==========================================
 
 def _detect_manual_patterns(o: np.ndarray, h: np.ndarray, l: np.ndarray, c: np.ndarray) -> List[str]:
-    """
-    Pure-Python detection for 40 classic Japanese candlestick patterns.
-    Requires no C-dependencies or external binary packages.
-    """
+    """Pure-Python detection for 40 classic Japanese candlestick patterns."""
     patterns = []
     n = len(c)
     if n < 1:
         return patterns
 
-    # Pre-extract candle components for up to 5 periods back
-    # [i]: 0 = current, 1 = 1-bar ago, 2 = 2-bars ago, etc.
     o_bars = [o[-1 - i] if n > i else 0.0 for i in range(min(5, n))]
     h_bars = [h[-1 - i] if n > i else 0.0 for i in range(min(5, n))]
     l_bars = [l[-1 - i] if n > i else 0.0 for i in range(min(5, n))]
     c_bars = [c[-1 - i] if n > i else 0.0 for i in range(min(5, n))]
 
-    # Derived geometric metrics
     body = [abs(c_bars[i] - o_bars[i]) for i in range(len(c_bars))]
     rng = [max(h_bars[i] - l_bars[i], 1e-6) for i in range(len(c_bars))]
     upper = [h_bars[i] - max(o_bars[i], c_bars[i]) for i in range(len(c_bars))]
@@ -108,208 +102,121 @@ def _detect_manual_patterns(o: np.ndarray, h: np.ndarray, l: np.ndarray, c: np.n
     is_bull = [c_bars[i] > o_bars[i] for i in range(len(c_bars))]
     is_bear = [c_bars[i] < o_bars[i] for i in range(len(c_bars))]
 
-    # Relative body benchmarks
     is_doji_0 = body[0] <= (0.1 * rng[0])
     is_long_0 = body[0] >= (0.6 * rng[0])
     is_small_0 = body[0] <= (0.3 * rng[0])
 
-    # =========================================================================
-    # SINGLE CANDLE PATTERNS (1 - 14)
-    # =========================================================================
-
-    # 1. Doji
+    # 1-14: Single Candle Patterns
     if is_doji_0:
         patterns.append("Doji")
-
-    # 2. Dragonfly Doji
     if is_doji_0 and lower[0] >= (0.6 * rng[0]) and upper[0] <= (0.1 * rng[0]):
         patterns.append("Dragonfly Doji")
-
-    # 3. Gravestone Doji
     if is_doji_0 and upper[0] >= (0.6 * rng[0]) and lower[0] <= (0.1 * rng[0]):
         patterns.append("Gravestone Doji")
-
-    # 4. Long-Legged Doji
     if is_doji_0 and upper[0] >= (0.35 * rng[0]) and lower[0] >= (0.35 * rng[0]):
         patterns.append("Long-Legged Doji")
-
-    # 5. Hammer
     if not is_doji_0 and lower[0] >= (2.0 * body[0]) and upper[0] <= (0.15 * rng[0]):
         patterns.append("Hammer")
-
-    # 6. Inverted Hammer
     if not is_doji_0 and upper[0] >= (2.0 * body[0]) and lower[0] <= (0.15 * rng[0]):
         patterns.append("Inverted Hammer")
-
-    # 7. Shooting Star
     if is_bear[0] and upper[0] >= (2.0 * body[0]) and lower[0] <= (0.15 * rng[0]):
         patterns.append("Shooting Star")
-
-    # 8. Hanging Man
     if is_bear[0] and lower[0] >= (2.0 * body[0]) and upper[0] <= (0.15 * rng[0]):
         patterns.append("Hanging Man")
-
-    # 9. Spinning Top
     if is_small_0 and not is_doji_0 and upper[0] >= (0.25 * rng[0]) and lower[0] >= (0.25 * rng[0]):
         patterns.append("Spinning Top")
-
-    # 10. Bullish Marubozu
     if is_bull[0] and is_long_0 and upper[0] <= (0.05 * rng[0]) and lower[0] <= (0.05 * rng[0]):
         patterns.append("Bullish Marubozu")
-
-    # 11. Bearish Marubozu
     if is_bear[0] and is_long_0 and upper[0] <= (0.05 * rng[0]) and lower[0] <= (0.05 * rng[0]):
         patterns.append("Bearish Marubozu")
-
-    # 12. High Wave
     if is_small_0 and upper[0] >= (0.35 * rng[0]) and lower[0] >= (0.35 * rng[0]):
         patterns.append("High Wave Candle")
-
-    # 13. Takuri (Deep Lower Shadow / Ambush)
     if is_small_0 and lower[0] >= (0.75 * rng[0]):
         patterns.append("Takuri Line")
-
-    # 14. Rickshaw Man
-    if is_doji_0 and abs(upper[0] - lower[0]) <= (0.15 * rng[0]) and rng[0] > (0.5 * np.mean([rng[i] for i in range(len(rng))])):
+    if is_doji_0 and abs(upper[0] - lower[0]) <= (0.15 * rng[0]) and rng[0] > (0.5 * np.mean(rng)):
         patterns.append("Rickshaw Man")
 
-    # =========================================================================
-    # TWO CANDLE PATTERNS (15 - 28)
-    # =========================================================================
+    # 15-28: Two Candle Patterns
     if n >= 2:
         prev_mid = (o_bars[1] + c_bars[1]) / 2.0
-
-        # 15. Bullish Engulfing
         if is_bear[1] and is_bull[0] and (o_bars[0] <= c_bars[1]) and (c_bars[0] >= o_bars[1]):
             patterns.append("Bullish Engulfing")
-
-        # 16. Bearish Engulfing
         if is_bull[1] and is_bear[0] and (o_bars[0] >= c_bars[1]) and (c_bars[0] <= o_bars[1]):
             patterns.append("Bearish Engulfing")
-
-        # 17. Bullish Harami
         if is_bear[1] and is_bull[0] and (o_bars[0] >= c_bars[1]) and (c_bars[0] <= o_bars[1]) and body[0] < body[1]:
             patterns.append("Bullish Harami")
-
-        # 18. Bearish Harami
         if is_bull[1] and is_bear[0] and (o_bars[0] <= c_bars[1]) and (c_bars[0] >= o_bars[1]) and body[0] < body[1]:
             patterns.append("Bearish Harami")
-
-        # 19. Harami Cross
         if is_doji_0 and (min(o_bars[1], c_bars[1]) <= c_bars[0] <= max(o_bars[1], c_bars[1])):
             patterns.append("Harami Cross")
-
-        # 20. Piercing Line
         if is_bear[1] and is_bull[0] and (o_bars[0] < l_bars[1]) and (c_bars[0] > prev_mid) and (c_bars[0] < o_bars[1]):
             patterns.append("Piercing Line")
-
-        # 21. Dark Cloud Cover
         if is_bull[1] and is_bear[0] and (o_bars[0] > h_bars[1]) and (c_bars[0] < prev_mid) and (c_bars[0] > o_bars[1]):
             patterns.append("Dark Cloud Cover")
-
-        # 22. Bullish Kicker
         if is_bear[1] and is_bull[0] and (o_bars[0] >= o_bars[1]) and (l_bars[0] > h_bars[1]):
             patterns.append("Bullish Kicker")
-
-        # 23. Bearish Kicker
         if is_bull[1] and is_bear[0] and (o_bars[0] <= o_bars[1]) and (h_bars[0] < l_bars[1]):
             patterns.append("Bearish Kicker")
-
-        # 24. Tweezer Bottom
         if abs(l_bars[0] - l_bars[1]) <= (0.05 * rng[0]) and is_bear[1] and is_bull[0]:
             patterns.append("Tweezer Bottom")
-
-        # 25. Tweezer Top
         if abs(h_bars[0] - h_bars[1]) <= (0.05 * rng[0]) and is_bull[1] and is_bear[0]:
             patterns.append("Tweezer Top")
-
-        # 26. Matching Low
         if is_bear[1] and is_bear[0] and abs(c_bars[0] - c_bars[1]) <= (0.05 * rng[0]):
             patterns.append("Matching Low")
-
-        # 27. On Neck Pattern
         if is_bear[1] and is_bull[0] and (o_bars[0] < l_bars[1]) and abs(c_bars[0] - l_bars[1]) <= (0.08 * rng[0]):
             patterns.append("On Neck")
-
-        # 28. In Neck Pattern
         if is_bear[1] and is_bull[0] and (o_bars[0] < l_bars[1]) and abs(c_bars[0] - c_bars[1]) <= (0.08 * rng[0]):
             patterns.append("In Neck")
 
-    # =========================================================================
-    # THREE CANDLE PATTERNS (29 - 38)
-    # =========================================================================
+    # 29-38: Three Candle Patterns
     if n >= 3:
-        # 29. Morning Star
         if (is_bear[2] and body[2] >= 0.5 * rng[2] and 
             body[1] <= 0.35 * rng[1] and max(o_bars[1], c_bars[1]) < min(o_bars[2], c_bars[2]) and
             is_bull[0] and c_bars[0] > ((o_bars[2] + c_bars[2]) / 2.0)):
             patterns.append("Morning Star")
-
-        # 30. Evening Star
         if (is_bull[2] and body[2] >= 0.5 * rng[2] and 
             body[1] <= 0.35 * rng[1] and min(o_bars[1], c_bars[1]) > max(o_bars[2], c_bars[2]) and
             is_bear[0] and c_bars[0] < ((o_bars[2] + c_bars[2]) / 2.0)):
             patterns.append("Evening Star")
-
-        # 31. Morning Doji Star
         if (is_bear[2] and (body[1] <= 0.1 * rng[1]) and 
             max(o_bars[1], c_bars[1]) < min(o_bars[2], c_bars[2]) and
             is_bull[0] and c_bars[0] > ((o_bars[2] + c_bars[2]) / 2.0)):
             patterns.append("Morning Doji Star")
-
-        # 32. Evening Doji Star
         if (is_bull[2] and (body[1] <= 0.1 * rng[1]) and 
             min(o_bars[1], c_bars[1]) > max(o_bars[2], c_bars[2]) and
             is_bear[0] and c_bars[0] < ((o_bars[2] + c_bars[2]) / 2.0)):
             patterns.append("Evening Doji Star")
-
-        # 33. Three White Soldiers
         if (is_bull[2] and is_bull[1] and is_bull[0] and
             (c_bars[0] > c_bars[1] > c_bars[2]) and
             (o_bars[0] > o_bars[1] and o_bars[0] < c_bars[1]) and
             (o_bars[1] > o_bars[2] and o_bars[1] < c_bars[2])):
             patterns.append("Three White Soldiers")
-
-        # 34. Three Black Crows
         if (is_bear[2] and is_bear[1] and is_bear[0] and
             (c_bars[0] < c_bars[1] < c_bars[2]) and
             (o_bars[0] < o_bars[1] and o_bars[0] > c_bars[1]) and
             (o_bars[1] < o_bars[2] and o_bars[1] > c_bars[2])):
             patterns.append("Three Black Crows")
-
-        # 35. Three Inside Up
         if (is_bear[2] and is_bull[1] and (o_bars[1] >= c_bars[2]) and (c_bars[1] <= o_bars[2]) and
             is_bull[0] and c_bars[0] > c_bars[1]):
             patterns.append("Three Inside Up")
-
-        # 36. Three Inside Down
         if (is_bull[2] and is_bear[1] and (o_bars[1] <= c_bars[2]) and (c_bars[1] >= o_bars[2]) and
             is_bear[0] and c_bars[0] < c_bars[1]):
             patterns.append("Three Inside Down")
-
-        # 37. Three Outside Up
         if (is_bear[2] and is_bull[1] and (o_bars[1] < c_bars[2]) and (c_bars[1] > o_bars[2]) and
             is_bull[0] and c_bars[0] > c_bars[1]):
             patterns.append("Three Outside Up")
-
-        # 38. Three Outside Down
         if (is_bull[2] and is_bear[1] and (o_bars[1] > c_bars[2]) and (c_bars[1] < o_bars[2]) and
             is_bear[0] and c_bars[0] < c_bars[1]):
             patterns.append("Three Outside Down")
 
-    # =========================================================================
-    # MULTI-CANDLE CONTINUATION PATTERNS (39 - 40)
-    # =========================================================================
+    # 39-40: Multi-Candle Continuation Patterns
     if n >= 5:
-        # 39. Rising Three Methods (Bullish Continuation)
         if (is_bull[4] and body[4] >= 0.5 * rng[4] and
             is_bear[3] and is_bear[2] and is_bear[1] and
             min(l_bars[1], l_bars[2], l_bars[3]) >= l_bars[4] and
             max(h_bars[1], h_bars[2], h_bars[3]) <= h_bars[4] and
             is_bull[0] and c_bars[0] > c_bars[4]):
             patterns.append("Rising Three Methods")
-
-        # 40. Falling Three Methods (Bearish Continuation)
         if (is_bear[4] and body[4] >= 0.5 * rng[4] and
             is_bull[3] and is_bull[2] and is_bull[1] and
             max(h_bars[1], h_bars[2], h_bars[3]) <= h_bars[4] and
@@ -333,33 +240,16 @@ def evaluate_technicals(candles: List[Candle]) -> dict:
         l = np.array(df['low'], dtype=float)
         c = np.array(df['close'], dtype=float)
 
-        detected = []
-
-        # 1. Attempt pandas-ta candlestick evaluation if available
-        try:
-            cdl_df = df.ta.cdl_pattern(name="all")
-            if cdl_df is not None and not cdl_df.empty:
-                last_row = cdl_df.iloc[-1]
-                active_patterns = last_row[last_row != 0]
-                if not active_patterns.empty:
-                    found = [col.replace('CDL_', '').replace('_', ' ').title() for col in active_patterns.index]
-                    detected.extend(found)
-        except Exception:
-            pass
-
-        # 2. Pure Python Reversal Pattern Fallback
-        fallback_patterns = _detect_manual_patterns(o, h, l, c)
-        detected.extend(fallback_patterns)
-
+        detected = _detect_manual_patterns(o, h, l, c)
         if detected:
             pattern_str = ", ".join(sorted(list(set(detected))))
 
-        # 3. Calculate Trend / Sentiment
+        # Calculate Trend / Sentiment via native pandas EWM
         sentiment = "BULLISH" if c[-1] > o[-1] else "BEARISH"
         if len(df) >= 10:
-            ema5 = ta.ema(df['close'], length=5)
-            ema10 = ta.ema(df['close'], length=10)
-            if ema5 is not None and ema10 is not None:
+            ema5 = df['close'].ewm(span=5, adjust=False).mean()
+            ema10 = df['close'].ewm(span=10, adjust=False).mean()
+            if not ema5.empty and not ema10.empty:
                 if ema5.iloc[-1] > ema10.iloc[-1]:
                     sentiment = "BULLISH"
                 elif ema5.iloc[-1] < ema10.iloc[-1]:
