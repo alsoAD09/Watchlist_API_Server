@@ -5,4 +5,3 @@ groq>=0.4.2
 pandas>=2.2.3
 numpy>=1.26.0
 pandas-ta
-TA-Lib-binary
