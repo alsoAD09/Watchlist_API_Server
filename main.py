@@ -288,7 +288,7 @@ Tkr:{req.ticker} | P:{req.last_visit_state.price}->{req.current_state.price} | V
 
     try:
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-20b",
             messages=[
                 {"role": "system", "content": "You are a precise quantitative financial parser. Return minified JSON only."},
                 {"role": "user", "content": user_prompt}
