@@ -2,7 +2,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
-from typing import List, Optional
+from typing import List, Optional, Dict
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -24,6 +24,14 @@ app.add_middleware(
 # Initialize Groq Client
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+# ==========================================
+# In-Memory Cache for Storing Last Meaningful Shifts
+# Key: Ticker Symbol (e.g., "TATASTEEL")
+# Value: Last valid ShiftAnalysisResponse object
+# ==========================================
+SHIFT_CACHE: Dict[str, dict] = {}
+
 
 # ==========================================
 # 1. Pydantic Models for API Data Schemas
@@ -78,6 +86,7 @@ class PatternDetectionResponse(BaseModel):
 
 class PatternDetectionRequest(BaseModel):
     stocks: List[StockCandleData]
+
 
 # ==========================================
 # 2. Pure-Python Candlestick & Technical Engine
@@ -244,7 +253,6 @@ def evaluate_technicals(candles: List[Candle]) -> dict:
         if detected:
             pattern_str = ", ".join(sorted(list(set(detected))))
 
-        # Calculate Trend / Sentiment via native pandas EWM
         sentiment = "BULLISH" if c[-1] > o[-1] else "BEARISH"
         if len(df) >= 10:
             ema5 = df['close'].ewm(span=5, adjust=False).mean()
@@ -260,6 +268,7 @@ def evaluate_technicals(candles: List[Candle]) -> dict:
 
     return {"pattern": pattern_str, "sentiment": sentiment}
 
+
 # ==========================================
 # 3. API Endpoints
 # ==========================================
@@ -273,34 +282,66 @@ def analyze_shift(req: ShiftAnalysisRequest):
     if not client:
         raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured.")
 
+    # Calculate exact delta percentages locally to assist LLM precision
+    price_change = req.current_state.price - req.last_visit_state.price
+    price_change_pct = (price_change / req.last_visit_state.price) * 100 if req.last_visit_state.price > 0 else 0.0
+    vol_change_pct = ((req.current_state.volume - req.last_visit_state.volume) / req.last_visit_state.volume) * 100 if req.last_visit_state.volume > 0 else 0.0
+
     ema_str = f" | EMA20:{req.last_visit_state.ema_20}->{req.current_state.ema_20}" if req.current_state.ema_20 else ""
     rsi_str = f" | RSI:{req.last_visit_state.rsi}->{req.current_state.rsi}" if req.current_state.rsi else ""
     
-    user_prompt = f"""Output valid JSON matching this structure:
+    # Strict prompt to eliminate hallucinations when change is negligible
+    user_prompt = f"""Output valid JSON matching this exact structure:
 {{"events_section_header":"str","numerical_changes":[{{"label":"str","value":"str","sub_value":"str"}}],"events":[{{"title":"str","timestamp_label":"str","description":"str"}}]}}
 
-RULES:
-1. 'events': Maximum 3 items. Deduce structural market shifts strictly from price action, volume anomalies, and technical indicators.
-2. 'numerical_changes': Maximum 3 items.
+CRITICAL RULES:
+1. IF price change is within -0.5% to +0.5% AND volume change is insignificant, treat it as NO MEANINGFUL CHANGE.
+2. In case of NO MEANINGFUL CHANGE, return: "events_section_header": "NO MEANINGFUL CHANGE", "numerical_changes": [], "events": [].
+3. DO NOT fabricate events or force arbitrary numerical changes if the difference is tiny.
+4. IF there IS a meaningful change, return at most 3 events and 3 numerical_changes.
 
 DATA:
-Tkr:{req.ticker} | P:{req.last_visit_state.price}->{req.current_state.price} | V:{req.last_visit_state.volume}->{req.current_state.volume}{ema_str}{rsi_str}"""
+Ticker: {req.ticker}
+Price: {req.last_visit_state.price} -> {req.current_state.price} (Change: {price_change:+.2f}, {price_change_pct:+.2f}%)
+Volume: {req.last_visit_state.volume} -> {req.current_state.volume} (Vol Change: {vol_change_pct:+.2f}%){ema_str}{rsi_str}"""
 
     try:
         completion = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "You are a precise quantitative financial parser. Return minified JSON only."},
+                {"role": "system", "content": "You are a strict, non-hallucinating quantitative financial parser. Return minified JSON only."},
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
-            temperature=0.1
+            temperature=0.0
         )
         
         raw_json_string = completion.choices[0].message.content
         parsed_data = json.loads(raw_json_string)
         
-        return ShiftAnalysisResponse(**parsed_data)
+        events = parsed_data.get("events", [])
+        num_changes = parsed_data.get("numerical_changes", [])
+
+        # Check if the LLM outputted empty/no meaningful change
+        is_no_change = len(events) == 0 and len(num_changes) == 0
+
+        ticker = req.ticker.upper()
+
+        if is_no_change:
+            # Fallback to last stored meaningful change if present
+            if ticker in SHIFT_CACHE:
+                return ShiftAnalysisResponse(**SHIFT_CACHE[ticker])
+            else:
+                # Return standard empty structure if no prior shift exists in memory
+                return ShiftAnalysisResponse(
+                    events_section_header="NO MEANINGFUL CHANGE SINCE LAST VISIT",
+                    numerical_changes=[],
+                    events=[]
+                )
+        else:
+            # Meaningful change found -> Update cache and return response
+            SHIFT_CACHE[ticker] = parsed_data
+            return ShiftAnalysisResponse(**parsed_data)
 
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Failed to parse LLM output into valid JSON.")
