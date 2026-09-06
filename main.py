@@ -307,7 +307,7 @@ Volume: {req.last_visit_state.volume} -> {req.current_state.volume} (Vol Change:
 
     try:
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-20b",
             messages=[
                 {"role": "system", "content": "You are a strict, non-hallucinating quantitative financial parser. Return minified JSON only."},
                 {"role": "user", "content": user_prompt}
